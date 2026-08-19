@@ -5046,9 +5046,12 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		// back: "Decide whether a reply is warranted", "produced actual
 		// work", "pure acknowledgment / thanks / sign-off", "do NOT reply",
 		// "Silence is a valid and preferred way".
+		// MUL-6417 merged the reply-mode block into the shared steps: the
+		// unconditional one-comment contract now lives in step 4, and the
+		// mention-after-work bullet is gone with the block (the discipline
+		// itself stays in `## Mentions`, pinned by the Mentions subtest).
 		for _, want := range []string{
-			"Posting your reply as a comment is mandatory",
-			"Do any requested work first",
+			"**Post your final results as a comment — this step is mandatory**",
 			"Never @mention the agent you are replying to as a thank-you or sign-off",
 		} {
 			if !strings.Contains(s, want) {
@@ -5102,24 +5105,23 @@ func TestInjectRuntimeConfigSquadLeaderCommentTriggeredNoAction(t *testing.T) {
 	}
 	s := string(data)
 
-	// The comment-triggered workflow must contain the squad leader no_action
-	// rule, and the reply imperative must carry the no_action carve-out so a
-	// later bullet never contradicts it (MUL-5442 #6493 review).
+	// The no_action rule lives on the leader variant of workflow step 4 since
+	// MUL-6417 (the reply-mode block that used to duplicate it is gone): the
+	// delivery imperative itself carries the carve-out, so no later bullet
+	// can contradict it (MUL-5442 #6493 review).
 	for _, want := range []string{
-		"Squad leader rule",
-		"DO NOT post any comment",
+		"unless your outcome is `no_action`",
 		"multica squad activity",
-		"Unless your outcome is `no_action` (Squad leader rule above), posting your reply as a comment is mandatory",
+		"DO NOT post a comment announcing no_action",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("squad leader comment-triggered CLAUDE.md missing %q", want)
 		}
 	}
-	// Capital-P form = the ordinary unconditional bullet; the leader brief
-	// must carry only the carve-out variant (its lowercase "posting your
-	// reply as a comment is mandatory" tail is expected and legal).
-	if strings.Contains(s, "Posting your reply as a comment is mandatory") {
-		t.Errorf("squad leader CLAUDE.md still carries the unconditional reply bullet")
+	// The unconditional ordinary-agent imperative must not coexist with the
+	// carve-out variant.
+	if strings.Contains(s, "**Post your final results as a comment — this step is mandatory**") {
+		t.Errorf("squad leader CLAUDE.md still carries the unconditional delivery step")
 	}
 
 	// The Output section must use strong prohibition language.
@@ -5142,8 +5144,8 @@ func TestInjectRuntimeConfigSquadLeaderCommentTriggeredNoAction(t *testing.T) {
 		t.Fatalf("read CLAUDE.md: %v", err)
 	}
 	s2 := string(data2)
-	if strings.Contains(s2, "Squad leader rule") {
-		t.Errorf("non-squad-leader CLAUDE.md should NOT contain squad leader rule")
+	if strings.Contains(s2, "unless your outcome is `no_action`") {
+		t.Errorf("non-squad-leader CLAUDE.md should NOT contain the leader no_action carve-out")
 	}
 }
 
