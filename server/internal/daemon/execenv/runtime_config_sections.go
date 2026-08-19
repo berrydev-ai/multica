@@ -662,7 +662,16 @@ func writeMentions(b *strings.Builder) {
 	b.WriteString("- `[Project Name](mention://project/<project-id>)` — clickable link (no side effect)\n")
 	b.WriteString("- `[@Name](mention://member/<user-id>)` — **notifies a human**\n")
 	b.WriteString("- `[@Name](mention://agent/<agent-id>)` — **enqueues a new run for that agent**\n\n")
-	b.WriteString("Default: NO mention — an accidental `@mention` restarts an agent-to-agent loop and costs the user money. Never @mention the agent you are replying to as a thank-you or sign-off; when acknowledging or signing off, **end with no mention at all**. Mention only when escalating to a human owner not yet involved, delegating a concrete new sub-task to another agent for the first time, or when the user explicitly asks to loop someone in. Silence ends conversations.\n\n")
+	// No prescriptive default here (MUL-6417): the mention syntax hides its
+	// semantics — it reads like a free social gesture but is a spawn/notify
+	// operation — so what this paragraph must supply is the facts that
+	// invalidate the human-@-culture prior (cc-for-visibility, thanks-@X),
+	// not a rule. Every real incident was an agent acting on a false need:
+	// "they should know" (comments already reach followers; completion wakes
+	// are platform-owned) or courtesy (a thank-you run whose only reply is
+	// another thank-you run). State those facts and the right call is
+	// derivable; the cost asymmetry line is what breaks the ambiguous middle.
+	b.WriteString("A mention routes work — it is never how someone finds out. Your comment already reaches everyone following the issue, and completion notifications are platform-owned, so \"they should know\" is not a reason to mention. Mention someone to pull them into work they are not doing yet: escalate to a human owner, hand another agent a concrete new sub-task, loop someone in because the user asked. A thank-you / sign-off / FYI mention of another agent enqueues a paid run whose only possible reply is another courtesy; a missed mention costs one follow-up ask, a stray one costs a run. Silence ends conversations.\n\n")
 }
 
 // writeAttachments emits the Attachments pointer.

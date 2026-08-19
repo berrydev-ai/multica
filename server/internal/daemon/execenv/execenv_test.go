@@ -4999,26 +4999,30 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 	t.Run("mentions-section-lists-loop-protocol", func(t *testing.T) {
 		t.Parallel()
 		s := readClaudeMD(t, assignmentCtx)
+		// MUL-6417: the section is fact-anchored, no prescriptive default.
+		// Pin each fact that invalidates a false reason to mention — losing
+		// any one of them re-opens the incident class it closed.
 		for _, want := range []string{
 			"side-effecting actions",
 			"enqueues a new run for that agent",
-			// MUL-5442 judgment rewrite: the two H3 subsections merged into one
-			// paragraph — pin the policy anchors, not the retired headings.
-			"Default: NO mention",
-			// Each warranted-case scope qualifier pinned separately — "not yet
-			// involved" and "for the first time" ARE the anti-repeat-notify
-			// scope, not decoration (review catch on #6453).
-			"restarts an agent-to-agent loop and costs the user money",
-			"Mention only when escalating to a human owner",
-			"not yet involved",
-			"for the first time",
-			"explicitly asks to loop someone in",
-			"end with no mention at all",
+			// "they should know" is a false need: delivery already happens.
+			"reaches everyone following the issue",
+			"completion notifications are platform-owned",
+			// The one real function, with its scope.
+			"pull them into work they are not doing yet",
+			// The courtesy-loop fact (the incident class behind #1581/#6453).
+			"whose only possible reply is another courtesy",
+			// The asymmetry that breaks ambiguous cases toward not mentioning.
+			"a missed mention costs one follow-up ask, a stray one costs a run",
 			"Silence ends conversations",
 		} {
 			if !strings.Contains(s, want) {
 				t.Errorf("Mentions section missing %q\n---\n%s", want, s)
 			}
+		}
+		// The bare prescription must not come back (MUL-6417).
+		if strings.Contains(s, "Default: NO mention") {
+			t.Errorf("Mentions section carries a prescriptive default again\n---\n%s", s)
 		}
 	})
 
@@ -5052,7 +5056,7 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		// itself stays in `## Mentions`, pinned by the Mentions subtest).
 		for _, want := range []string{
 			"**Post your final results as a comment — this step is mandatory**",
-			"Never @mention the agent you are replying to as a thank-you or sign-off",
+			"whose only possible reply is another courtesy",
 		} {
 			if !strings.Contains(s, want) {
 				t.Errorf("comment-triggered CLAUDE.md missing %q", want)
