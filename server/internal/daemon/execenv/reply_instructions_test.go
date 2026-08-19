@@ -209,8 +209,8 @@ func TestInjectRuntimeConfigKeepsTriggerCommentOutOfBrief(t *testing.T) {
 		// halves — a compression that drops either delivery case must fail
 		// here.
 		"**Every issue turn runs the same workflow.**",
-		"use the `--parent` value that message gives you for THIS turn",
-		"never a `--parent` from an earlier turn in this session",
+		"with the `--parent` value it gives you for THIS turn",
+		"never one from an earlier turn",
 		"With no triggering comment, post a new top-level comment",
 		// The no-write default that makes the un-routed workflow safe: a
 		// turn that moved nothing writes nothing (MUL-6300 → MUL-6417).

@@ -5005,11 +5005,13 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		for _, want := range []string{
 			"side-effecting actions",
 			"enqueues a new run for that agent",
-			// "they should know" is a false need: delivery already happens.
-			"reaches everyone following the issue",
+			// Notifying FOLLOWERS is a false need: delivery already happens.
+			// Scoped to followers on purpose — for a non-follower, a mention
+			// IS how they find out (Elon's review catch on #7245).
+			"followers of the issue already see your comment",
 			"completion notifications are platform-owned",
 			// The one real function, with its scope.
-			"pull them into work they are not doing yet",
+			"pulls someone into work they are not doing yet",
 			// The courtesy-loop fact (the incident class behind #1581/#6453).
 			"whose only possible reply is another courtesy",
 			// The asymmetry that breaks ambiguous cases toward not mentioning.
@@ -5020,9 +5022,13 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 				t.Errorf("Mentions section missing %q\n---\n%s", want, s)
 			}
 		}
-		// The bare prescription must not come back (MUL-6417).
-		if strings.Contains(s, "Default: NO mention") {
-			t.Errorf("Mentions section carries a prescriptive default again\n---\n%s", s)
+		// Neither the bare prescription (MUL-6417) nor the overreach that
+		// replaced it may come back: "never how someone finds out" was false
+		// for non-followers and suppressed legitimate human escalation.
+		for _, banned := range []string{"Default: NO mention", "never how someone finds out"} {
+			if strings.Contains(s, banned) {
+				t.Errorf("Mentions section carries retired wording %q\n---\n%s", banned, s)
+			}
 		}
 	})
 

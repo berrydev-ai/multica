@@ -184,7 +184,7 @@ func TestStatusRuleIsEndOfTurnFactJudgment(t *testing.T) {
 		// the old unconditional arc got wrong twice (MUL-6417).
 		"A `todo` issue you were asked to research stays `todo`",
 		// Invariant 2: concurrent agents converge instead of flapping.
-		"agents judging the same fact write the same value, or nothing",
+		"This no-write default is what keeps concurrent runs from flapping the board",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status rule missing %q\n---\n%s", want, out)

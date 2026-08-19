@@ -174,9 +174,9 @@ Advancement is agent-driven: the server only detects the closed barrier and
 wakes the parent assignee. Promoting the next stage's `backlog` sub-issues to
 `todo` is the woken agent's decision, not a server side effect. When the woken
 assignee (often a squad leader) decides the parent is complete, the system
-comment explicitly asks for `multica issue status <parent-id> in_review`. A
-reply turn may move the status on its own too, but only when the issue is
-assigned to that agent and the turn actually delivered work.
+comment explicitly asks for `multica issue status <parent-id> in_review`. Any
+turn may move the status on its own too, judged at the end of the turn from
+what the work changed about the issue — there is no assignee gate (MUL-6417).
 
 ## Metadata CLI
 
