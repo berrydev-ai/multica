@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,13 @@ import (
 type fakeReplySender struct {
 	sent  *channel.OutboundMessage
 	calls int
+	// Ephemeral traffic is counted separately from visible traffic: several
+	// tests assert precisely that a refusal took the ephemeral path and that
+	// chat.postMessage was never called.
+	ephemeral      *channel.OutboundMessage
+	ephemeralUser  string
+	ephemeralCalls int
+	ephemeralErr   error
 }
 
 func (f *fakeReplySender) Send(_ context.Context, out channel.OutboundMessage) (channel.SendResult, error) {
@@ -23,6 +31,14 @@ func (f *fakeReplySender) Send(_ context.Context, out channel.OutboundMessage) (
 	cp := out
 	f.sent = &cp
 	return channel.SendResult{MessageID: "1.1"}, nil
+}
+
+func (f *fakeReplySender) SendEphemeral(_ context.Context, out channel.OutboundMessage, userID string) error {
+	f.ephemeralCalls++
+	cp := out
+	f.ephemeral = &cp
+	f.ephemeralUser = userID
+	return f.ephemeralErr
 }
 
 type fakeBindingMinter struct {
@@ -39,13 +55,13 @@ func (f *fakeBindingMinter) Mint(_ context.Context, ws, inst pgtype.UUID, user s
 	return BindingToken{Raw: f.raw, ExpiresAt: time.Unix(0, 0)}, nil
 }
 
-func newTestReplier(binding bindingMinter, sender replySender) *OutboundReplier {
+func newTestReplier(binding bindingMinter, sender noticeSender) *OutboundReplier {
 	r := NewOutboundReplier(OutboundReplierConfig{
 		Binding: binding,
 		Decrypt: nil, // identity: stored bot token is base64 plaintext
 		AppURL:  "https://multica.example",
 	})
-	r.newSender = func(credentials) replySender { return sender }
+	r.newSender = func(credentials) noticeSender { return sender }
 	return r
 }
 
@@ -76,12 +92,22 @@ func testInboundForReply() channel.InboundMessage {
 	}
 }
 
+// testInboundDMForReply is the same message arriving in a direct message. The
+// binding prompt lives here and only here: a DM has no audience, so offering a
+// workspace member the link that onboards them reveals nothing to anybody else.
+func testInboundDMForReply() channel.InboundMessage {
+	msg := testInboundForReply()
+	msg.Source.ChatID = "D1"
+	msg.Source.ChatType = channel.ChatTypeP2P
+	return msg
+}
+
 func TestReply_NeedsBinding_MintsAndPostsPrompt(t *testing.T) {
 	sender := &fakeReplySender{}
 	minter := &fakeBindingMinter{raw: "tok_RAW-123"}
 	r := newTestReplier(minter, sender)
 	inst := testResolvedInstallation(t)
-	msg := testInboundForReply()
+	msg := testInboundDMForReply()
 
 	r.Reply(context.Background(), inst, msg, engine.Result{
 		Outcome: engine.OutcomeNeedsBinding,
@@ -97,7 +123,7 @@ func TestReply_NeedsBinding_MintsAndPostsPrompt(t *testing.T) {
 	if sender.calls != 1 || sender.sent == nil {
 		t.Fatalf("expected one reply, got %d", sender.calls)
 	}
-	if sender.sent.ChatID != "C1" || sender.sent.ThreadID != "1700000000.000200" {
+	if sender.sent.ChatID != "D1" || sender.sent.ThreadID != "1700000000.000200" {
 		t.Errorf("reply target = %+v", sender.sent)
 	}
 	// The prompt must carry the redeem URL with the minted token, wrapped as a
@@ -307,4 +333,105 @@ func textOrEmpty(m *channel.OutboundMessage) string {
 		return ""
 	}
 	return m.Text
+}
+
+// --- notice delivery -------------------------------------------------------
+//
+// The cooldown's own matrix lives in refusal_test.go. What follows is the
+// wiring: which Slack call each notice takes, and that a channel never sees one.
+
+func TestReply_UnauthorizedMentionInChannel_IsEphemeralOnly(t *testing.T) {
+	sender := &fakeReplySender{}
+	minter := &fakeBindingMinter{raw: "tok_RAW-123"}
+	r := newTestReplier(minter, sender)
+
+	r.Reply(context.Background(), testResolvedInstallation(t), testInboundForReply(), engine.Result{
+		Outcome: engine.OutcomeNeedsBinding,
+		Sender:  "UALICE",
+	})
+
+	if sender.calls != 0 {
+		t.Fatalf("chat.postMessage calls = %d, want 0: the binding card must never be visible to the channel", sender.calls)
+	}
+	if sender.ephemeralCalls != 1 || sender.ephemeral == nil {
+		t.Fatalf("chat.postEphemeral calls = %d, want 1", sender.ephemeralCalls)
+	}
+	if sender.ephemeralUser != "UALICE" {
+		t.Errorf("ephemeral target = %q, want the person who spoke", sender.ephemeralUser)
+	}
+	if sender.ephemeral.ChatID != "C1" {
+		t.Errorf("ephemeral channel = %q, want the originating channel", sender.ephemeral.ChatID)
+	}
+	// Still a real, redeemable offer — only the audience changed.
+	if minter.calls != 1 || !strings.Contains(sender.ephemeral.Text, "tok_RAW-123") {
+		t.Errorf("Mint calls = %d, text = %q", minter.calls, sender.ephemeral.Text)
+	}
+}
+
+// Without a cooldown the prompt is a megaphone: anyone can make the bot speak on
+// demand, and every message mints another single-use token.
+func TestReply_RepeatedUnboundMessages_AnswerOnce(t *testing.T) {
+	sender := &fakeReplySender{}
+	minter := &fakeBindingMinter{raw: "tok_RAW-123"}
+	r := newTestReplier(minter, sender)
+	inst := testResolvedInstallation(t)
+	msg := testInboundDMForReply()
+	result := engine.Result{Outcome: engine.OutcomeNeedsBinding, Sender: "UALICE"}
+
+	for range 4 {
+		r.Reply(context.Background(), inst, msg, result)
+	}
+
+	if sender.calls != 1 {
+		t.Fatalf("replies = %d, want exactly one inside the cooldown", sender.calls)
+	}
+	if minter.calls != 1 {
+		t.Errorf("Mint calls = %d, want one token, not one per message", minter.calls)
+	}
+}
+
+func TestReply_EphemeralFailureFallsBackToSilence(t *testing.T) {
+	sender := &fakeReplySender{ephemeralErr: errors.New("channel_not_found")}
+	r := newTestReplier(&fakeBindingMinter{raw: "tok"}, sender)
+
+	r.Reply(context.Background(), testResolvedInstallation(t), testInboundForReply(), engine.Result{
+		Outcome: engine.OutcomeNeedsBinding,
+		Sender:  "UALICE",
+	})
+
+	if sender.calls != 0 {
+		t.Fatalf("chat.postMessage calls = %d: a failed ephemeral must never fall back to a visible post", sender.calls)
+	}
+}
+
+// A prompt that cannot be built is not downgraded into a bare message the
+// recipient cannot act on: say nothing, log it, try again after the cooldown.
+func TestReply_BindingPromptFailure_SaysNothing(t *testing.T) {
+	sender := &fakeReplySender{}
+	r := newTestReplier(&fakeBindingMinter{raw: "tok"}, sender)
+	r.appURL = "" // not configured
+
+	r.Reply(context.Background(), testResolvedInstallation(t), testInboundDMForReply(), engine.Result{
+		Outcome: engine.OutcomeNeedsBinding,
+		Sender:  "UALICE",
+	})
+
+	if sender.calls != 0 || sender.ephemeralCalls != 0 {
+		t.Fatalf("sends = %d, ephemeral = %d; want silence when the prompt cannot be built", sender.calls, sender.ephemeralCalls)
+	}
+}
+
+// The Result carries the sender for exactly this reason: a notice has to be
+// addressable even when the reply path only sees the envelope.
+func TestReply_FallsBackToTheEnvelopeSender(t *testing.T) {
+	sender := &fakeReplySender{}
+	r := newTestReplier(&fakeBindingMinter{raw: "tok"}, sender)
+
+	r.Reply(context.Background(), testResolvedInstallation(t), testInboundForReply(), engine.Result{
+		Outcome: engine.OutcomeNeedsBinding,
+	})
+
+	if sender.ephemeralUser != "UALICE" {
+		t.Errorf("ephemeral target = %q, want the envelope's sender", sender.ephemeralUser)
+	}
 }

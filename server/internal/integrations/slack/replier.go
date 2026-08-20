@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/slack-go/slack"
@@ -37,6 +38,14 @@ const (
 	issueUsageText    = "Please include an issue title. Use:\n\n`/issue <title>`\n`[description]` (optional)"
 )
 
+// noticeSender posts the replier's own notices. It is a superset of
+// replySender: a refusal must be deliverable WITHOUT the rest of the room
+// seeing it, which chat.postMessage cannot do. *slackSender satisfies it.
+type noticeSender interface {
+	replySender
+	SendEphemeral(ctx context.Context, out channel.OutboundMessage, userID string) error
+}
+
 // bindingMinter is the binding-token surface the replier needs.
 // *BindingTokenService satisfies it.
 type bindingMinter interface {
@@ -47,10 +56,11 @@ type bindingMinter interface {
 type OutboundReplier struct {
 	binding     bindingMinter
 	decrypt     Decrypter
-	newSender   func(creds credentials) replySender
+	newSender   func(creds credentials) noticeSender
 	appURL      string
 	bindingPath string
 	logger      *slog.Logger
+	refusals    *refusalLimiter
 }
 
 // OutboundReplierConfig configures the replier. Binding + AppURL are required
@@ -93,8 +103,9 @@ func NewOutboundReplier(cfg OutboundReplierConfig) *OutboundReplier {
 		appURL:      strings.TrimRight(cfg.AppURL, "/"),
 		bindingPath: bindingPath,
 		logger:      logger,
+		refusals:    newRefusalLimiter(time.Now),
 	}
-	r.newSender = func(c credentials) replySender {
+	r.newSender = func(c credentials) noticeSender {
 		return newSlackSender(c, slack.New(c.BotToken), logger)
 	}
 	return r
@@ -105,10 +116,7 @@ func NewOutboundReplier(cfg OutboundReplierConfig) *OutboundReplier {
 func (r *OutboundReplier) Reply(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, res engine.Result) {
 	switch res.Outcome {
 	case engine.OutcomeNeedsBinding:
-		if err := r.sendBindingPrompt(ctx, inst, msg, res); err != nil {
-			r.logger.WarnContext(ctx, "slack replier: binding prompt failed",
-				"installation_id", util.UUIDToString(inst.ID), "error", err)
-		}
+		r.replyUnauthorizedSender(ctx, inst, msg, res)
 	case engine.OutcomeAgentOffline:
 		if err := r.post(ctx, inst, msg, agentOfflineText); err != nil {
 			r.logger.WarnContext(ctx, "slack replier: offline notice failed",
@@ -145,31 +153,108 @@ func (r *OutboundReplier) Reply(ctx context.Context, inst engine.ResolvedInstall
 	}
 }
 
-func (r *OutboundReplier) sendBindingPrompt(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, res engine.Result) error {
+// replyUnauthorizedSender answers somebody the identity gate turned away, by
+// offering them the link that binds their Slack account.
+//
+// Two things decide what happens. The cooldown comes first: a person who has
+// already been answered gets nothing at all, so repeated messages cannot be
+// used to make the bot talk on demand or to mint an unbounded number of binding
+// tokens. Then the room. Anywhere other people can see, the offer goes out
+// ephemerally — a "link your account" card posted into a channel announces that
+// a bot is standing there and invites the rest of the room to ask about it, and
+// the offer is no use to any of them anyway.
+func (r *OutboundReplier) replyUnauthorizedSender(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, res engine.Result) {
 	sender := res.Sender
 	if sender == "" {
 		sender = msg.Source.SenderID
 	}
+	if !r.refusals.allow(inst.ID, sender) {
+		return
+	}
+	r.logRefusal(ctx, inst, msg, sender, "sender is not a bound workspace member")
+	text, err := r.bindingPrompt(ctx, inst, sender)
+	if err != nil {
+		r.logger.WarnContext(ctx, "slack replier: binding prompt failed",
+			"installation_id", util.UUIDToString(inst.ID), "error", err)
+		return
+	}
+	r.deliver(ctx, inst, msg, sender, text)
+}
+
+// deliver sends one notice to the person it concerns: visibly in a direct
+// message, where the only reader is that person, and ephemerally anywhere else.
+func (r *OutboundReplier) deliver(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, userID, text string) {
+	if msg.Source.ChatType != channel.ChatTypeP2P {
+		r.postEphemeral(ctx, inst, msg, userID, text)
+		return
+	}
+	if err := r.post(ctx, inst, msg, text); err != nil {
+		r.logger.WarnContext(ctx, "slack replier: notice failed",
+			"installation_id", util.UUIDToString(inst.ID), "error", err)
+	}
+}
+
+// logRefusal records one denial: who, where, and what kind of conversation.
+// Never the message body — the bot is refusing to process this person's words,
+// and copying them into a log would be processing them.
+func (r *OutboundReplier) logRefusal(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, sender, reason string) {
+	r.logger.WarnContext(ctx, "slack replier: request refused",
+		"installation_id", util.UUIDToString(inst.ID),
+		"slack_user_id", sender,
+		"slack_channel_id", msg.Source.ChatID,
+		"chat_type", string(msg.Source.ChatType),
+		"reason", reason,
+	)
+}
+
+// postEphemeral delivers text to one person inside a conversation. A failure
+// falls back to SILENCE, never to a visible post: a refusal the whole room can
+// read is worse than no refusal at all.
+func (r *OutboundReplier) postEphemeral(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, userID, text string) {
+	row, ok := inst.Platform.(db.ChannelInstallation)
+	if !ok {
+		r.logger.WarnContext(ctx, "slack replier: ephemeral refusal skipped, installation row unavailable",
+			"installation_id", util.UUIDToString(inst.ID))
+		return
+	}
+	creds, err := decodeCredentials(row.Config, r.decrypt)
+	if err != nil {
+		r.logger.WarnContext(ctx, "slack replier: ephemeral refusal skipped, credentials unreadable",
+			"installation_id", util.UUIDToString(inst.ID), "error", err)
+		return
+	}
+	if err := r.newSender(creds).SendEphemeral(ctx, channel.OutboundMessage{
+		ChatID:   msg.Source.ChatID,
+		Text:     text,
+		ThreadID: msg.Source.ThreadID,
+	}, userID); err != nil {
+		r.logger.WarnContext(ctx, "slack replier: ephemeral refusal failed",
+			"installation_id", util.UUIDToString(inst.ID), "error", err)
+	}
+}
+
+// bindingPrompt mints a single-use token and renders the "link your account"
+// text. It only builds the message; the caller decides who gets to read it.
+func (r *OutboundReplier) bindingPrompt(ctx context.Context, inst engine.ResolvedInstallation, sender string) (string, error) {
 	if sender == "" {
-		return errors.New("missing sender id")
+		return "", errors.New("missing sender id")
 	}
 	if r.binding == nil {
-		return errors.New("binding service not configured")
+		return "", errors.New("binding service not configured")
 	}
 	if r.appURL == "" {
-		return errors.New("app url not configured")
+		return "", errors.New("app url not configured")
 	}
 	token, err := r.binding.Mint(ctx, inst.WorkspaceID, inst.ID, sender)
 	if err != nil {
-		return fmt.Errorf("mint binding token: %w", err)
+		return "", fmt.Errorf("mint binding token: %w", err)
 	}
 	bindURL := r.appURL + r.bindingPath + "?token=" + url.QueryEscape(token.Raw)
 	// Wrap the URL as an explicit Slack link <url|label>: formatMrkdwn protects
 	// these from its markdown passes, so the base64url token's `_`/`-` chars are
 	// not mangled into italics.
-	text := "👋 To start chatting with me, link your Slack account to Multica: <" +
-		bindURL + "|link your account>\n(This link expires in 15 minutes.)"
-	return r.post(ctx, inst, msg, text)
+	return "👋 To start chatting with me, link your Slack account to Multica: <" +
+		bindURL + "|link your account>\n(This link expires in 15 minutes.)", nil
 }
 
 // post resolves the installation's bot token from the carried platform row and

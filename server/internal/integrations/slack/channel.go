@@ -60,6 +60,33 @@ func (c *slackSender) Send(ctx context.Context, out channel.OutboundMessage) (ch
 	return channel.SendResult{MessageID: lastTS}, nil
 }
 
+// SendEphemeral posts a message only the target user can see, via
+// chat.postEphemeral. It is how a refusal reaches the person who triggered it
+// without announcing to the rest of the room that a gated bot is present.
+//
+// Unlike Send it does not chunk: every ephemeral body in this adapter is one
+// short fixed string, and a refusal that arrived in three parts would be worse
+// than one truncated at Slack's cap.
+func (c *slackSender) SendEphemeral(ctx context.Context, out channel.OutboundMessage, userID string) error {
+	if c.api == nil {
+		return errors.New("slack: api client not configured")
+	}
+	if userID == "" {
+		return errors.New("slack: ephemeral reply needs a target user")
+	}
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(formatMrkdwn(out.Text), false),
+		slack.MsgOptionDisableLinkUnfurl(),
+	}
+	if threadTS := outboundThreadTS(out); threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	if _, err := c.api.PostEphemeralContext(ctx, out.ChatID, userID, opts...); err != nil {
+		return fmt.Errorf("slack: chat.postEphemeral: %w", err)
+	}
+	return nil
+}
+
 // newSlackSender builds a Send-only client from decoded credentials and a
 // configured API client. Kept separate from the outbound subscriber so tests
 // can inject a client pointed at an httptest server.
