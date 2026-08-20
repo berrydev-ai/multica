@@ -55,6 +55,7 @@ type installQueries interface {
 	ListChannelInstallationsByWorkspace(ctx context.Context, arg db.ListChannelInstallationsByWorkspaceParams) ([]db.ChannelInstallation, error)
 	GetChannelInstallationInWorkspace(ctx context.Context, arg db.GetChannelInstallationInWorkspaceParams) (db.ChannelInstallation, error)
 	SetChannelInstallationStatus(ctx context.Context, arg db.SetChannelInstallationStatusParams) error
+	SetChannelInstallationConfig(ctx context.Context, arg db.SetChannelInstallationConfigParams) error
 }
 
 // dbInstallQueries adapts *db.Queries to installQueries — the generated WithTx
@@ -80,6 +81,10 @@ type InstallService struct {
 	// apiURL overrides the Slack API base for the BYO auth.test call (tests point
 	// it at an httptest server). Empty uses the real Slack API.
 	apiURL string
+
+	// authRosterFactory overrides how the access-policy validator reaches
+	// Slack. Nil uses the real Web API.
+	authRosterFactory func(creds credentials) conversationRoster
 }
 
 // NewInstallService binds the service to queries, a tx starter (*pgxpool.Pool),

@@ -191,6 +191,7 @@ const (
 	// invalidate the Slack installations query on either.
 	EventSlackInstallationCreated = "slack_installation:created"
 	EventSlackInstallationRevoked = "slack_installation:revoked"
+	EventSlackInstallationUpdated = "slack_installation:updated"
 
 	// DingTalk installation lifecycle follows the same create/revoke semantics
 	// as Slack's BYO channel installation. BindingUpdated shares the

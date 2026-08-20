@@ -29,10 +29,18 @@ type SlackInstallationResponse struct {
 	InstalledAt     string `json:"installed_at"`
 	CreatedAt       string `json:"created_at"`
 	UpdatedAt       string `json:"updated_at"`
+	// Access policy, so the Integrations tab can show who this Bot serves
+	// without a second request. Non-secret by construction: channel ids and a
+	// mode name.
+	ChatGate          string   `json:"chat_gate"`
+	RefusalText       string   `json:"refusal_text"`
+	AuthChannelID     string   `json:"auth_channel_id"`
+	AllowedChannelIDs []string `json:"allowed_channel_ids"`
 }
 
 func slackInstallationToResponse(row db.ChannelInstallation) SlackInstallationResponse {
 	info := slack.DecodePublicConfig(row.Config)
+	policy := slack.DescribeAccessPolicy(row.Config)
 	return SlackInstallationResponse{
 		ID:              uuidToString(row.ID),
 		WorkspaceID:     uuidToString(row.WorkspaceID),
@@ -44,6 +52,11 @@ func slackInstallationToResponse(row db.ChannelInstallation) SlackInstallationRe
 		InstalledAt:     row.InstalledAt.Time.UTC().Format(time.RFC3339),
 		CreatedAt:       row.CreatedAt.Time.UTC().Format(time.RFC3339),
 		UpdatedAt:       row.UpdatedAt.Time.UTC().Format(time.RFC3339),
+
+		ChatGate:          string(policy.Gate),
+		RefusalText:       policy.RefusalText,
+		AuthChannelID:     policy.AuthChannelID,
+		AllowedChannelIDs: policy.AllowedChannelIDs,
 	}
 }
 
@@ -279,4 +292,76 @@ func (h *Handler) RedeemSlackBindingToken(w http.ResponseWriter, r *http.Request
 		InstallationID: uuidToString(redeemed.InstallationID),
 		SlackUserID:    redeemed.SlackUserID,
 	})
+}
+
+// SlackAccessPolicyRequest is the body of PUT .../slack/installations/{id}/access.
+// It states the COMPLETE policy: an omitted auth_channel_id clears the
+// authorization channel rather than leaving the previous one in place.
+type SlackAccessPolicyRequest struct {
+	ChatGate string `json:"chat_gate"`
+	// RefusalText overrides what somebody who may not use this Bot is told.
+	// Empty keeps the deliberately uninformative default.
+	RefusalText       string   `json:"refusal_text"`
+	AuthChannelID     string   `json:"auth_channel_id"`
+	AllowedChannelIDs []string `json:"allowed_channel_ids"`
+}
+
+// SetSlackAccessPolicy (PUT /api/workspaces/{id}/slack/installations/{installationId}/access)
+// sets which people and which conversations an installation serves.
+//
+// The authorization channel is validated against live Slack before anything is
+// stored: a public channel, a channel the Bot has not joined, and a channel id
+// that does not resolve are all rejected here with a reason. The alternative —
+// storing whatever was sent and letting the room guard deny everybody at
+// runtime — turns a typo into an outage nobody can diagnose from Slack.
+func (h *Handler) SetSlackAccessPolicy(w http.ResponseWriter, r *http.Request) {
+	if h.SlackInstall == nil {
+		writeError(w, http.StatusServiceUnavailable, "slack integration not configured")
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id")
+	if !ok {
+		return
+	}
+	instUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "installationId"), "installation id")
+	if !ok {
+		return
+	}
+	var req SlackAccessPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	policy, err := h.SlackInstall.SetAccessPolicy(r.Context(), instUUID, wsUUID, slack.AccessPolicyInput{
+		Gate:             slack.ChatGate(req.ChatGate),
+		RefusalText:      req.RefusalText,
+		AuthChannelID:    req.AuthChannelID,
+		AllowedChannelID: req.AllowedChannelIDs,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, slack.ErrInstallationNotFound):
+			writeError(w, http.StatusNotFound, "slack installation not found")
+		case errors.Is(err, slack.ErrInvalidChatGate):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, slack.ErrAuthChannelNotPrivate):
+			writeError(w, http.StatusBadRequest, "the authorization channel must be a private channel: anyone can join a public one, which would let anyone authorize themselves")
+		case errors.Is(err, slack.ErrAuthChannelNotJoined):
+			writeError(w, http.StatusBadRequest, "invite the Bot to the authorization channel first, otherwise it cannot read the membership")
+		case errors.Is(err, slack.ErrAuthChannelUnreadable):
+			writeError(w, http.StatusBadRequest, "could not read the authorization channel: check the channel id and that the app has the groups:read scope")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update access policy")
+		}
+		return
+	}
+	h.publish(protocol.EventSlackInstallationUpdated, uuidToString(wsUUID), "user", userID, map[string]any{
+		"id": uuidToString(instUUID),
+	})
+	writeJSON(w, http.StatusOK, policy)
 }

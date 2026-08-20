@@ -58,6 +58,12 @@ type fakeInstallQueries struct {
 	ownerWorkspaceID pgtype.UUID
 	ownerArchived    bool
 	ownerMissing     bool
+
+	// getInWorkspace / getErr answer the workspace-scoped lookup the access
+	// policy path runs; savedConfig records what it persisted.
+	getInWorkspace *db.ChannelInstallation
+	getErr         error
+	savedConfig    []byte
 }
 
 // WithTx returns the same fake — the fake tx is a no-op token.
@@ -107,7 +113,18 @@ func (f *fakeInstallQueries) ListChannelInstallationsByWorkspace(_ context.Conte
 }
 
 func (f *fakeInstallQueries) GetChannelInstallationInWorkspace(_ context.Context, _ db.GetChannelInstallationInWorkspaceParams) (db.ChannelInstallation, error) {
+	if f.getErr != nil {
+		return db.ChannelInstallation{}, f.getErr
+	}
+	if f.getInWorkspace != nil {
+		return *f.getInWorkspace, nil
+	}
 	return db.ChannelInstallation{}, nil
+}
+
+func (f *fakeInstallQueries) SetChannelInstallationConfig(_ context.Context, arg db.SetChannelInstallationConfigParams) error {
+	f.savedConfig = arg.Config
+	return nil
 }
 
 func (f *fakeInstallQueries) SetChannelInstallationStatus(_ context.Context, _ db.SetChannelInstallationStatusParams) error {
