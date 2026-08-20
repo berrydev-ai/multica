@@ -105,6 +105,8 @@ Both tokens are stored encrypted on the Multica server. Tokens are credentials �
 
 The first time a member DMs or @-mentions the Bot, they receive an account binding link. Sign in with the Multica account for that workspace, then return to Slack and send the message again.
 
+In a channel or group chat the link is sent privately — only the person who wrote the message sees it, and nothing appears in the conversation. Anyone who is not a member of the Multica workspace can request the link but cannot redeem it, and the Bot answers each person at most once a day.
+
 The link is single-use and expires after 15 minutes. Once it expires, message the Bot again for a new one. Multiple Bots in the same Multica workspace can usually reuse an existing binding if they come from the same Slack workspace.
 
 Only members of the current Multica workspace can use the Bot.
@@ -137,6 +139,65 @@ In a channel or DM, type:
 
 This command needs no @-mention. Multica hands the description to the agent behind the current Bot, which writes up the title and body and creates the issue. Slack first shows an acknowledgment visible only to you; when the issue is created, you get a notification in your Multica inbox.
 
+## Restrict who and where the Bot serves
+
+By default the Bot serves any conversation it has been invited to, once the sender has bound their account and is a member of the Multica workspace. That is enough for most teams: an outsider can talk to the Bot but gets no work out of it.
+
+It is not enough when the Bot's answers are themselves sensitive. Everything the Bot says is visible to every person in the conversation, so a reply to an authorized member in a wide channel — or in a group chat that contains one guest — publishes that reply to all of them.
+
+Set the installation's chat gate to `members_only` to authorize the conversation as well as the sender:
+
+The two lists answer different questions and do not overlap. `auth_channel_id` decides **who** may use the Bot; `allowed_channel_ids` decides **where** it works. Holding the roster does not make that channel a place the Bot answers — list it in both if you want to talk to the Bot there too.
+
+| Conversation | Served when |
+| --- | --- |
+| Direct message | The sender is bound and still a workspace member. |
+| Group chat (multi-party DM) | Every non-bot participant is bound and still a workspace member. One outsider closes the conversation, even for an authorized sender. |
+| Channel | The sender is authorized **and** the channel id appears in the installation's allowed channel list. |
+
+A closed conversation costs a membership lookup and nothing else — no session, no agent run, no model usage. The sender is told privately that the Bot is unavailable there; nobody else sees anything.
+
+Set it with:
+
+```http
+PUT /api/workspaces/{workspace_id}/slack/installations/{installation_id}/access
+```
+
+```json
+{
+  "chat_gate": "members_only",
+  "auth_channel_id": "G0123456789",
+  "refusal_text": "Not an authorized operator",
+  "allowed_channel_ids": ["C0123456789"]
+}
+```
+
+A person who is not on the roster is told so, privately, wherever they wrote — set `refusal_text` to say it in your own words, or leave it out for a deliberately uninformative default. Somebody who *is* on the roster but writes in a channel the Bot does not work in gets a different message naming the place instead, so they know to move rather than to ask for access.
+
+Workspace owners and admins only. The body states the **complete** policy — omitting a field clears it rather than leaving the previous value — and the current policy comes back on every installation in `GET /slack/installations`.
+
+Leave `allowed_channel_ids` out to reach the Bot in direct messages and authorized group chats only. Channel ids are case-sensitive.
+
+### Use a Slack channel as the roster
+
+Naming an `auth_channel_id` makes a private Slack channel's membership the authorization list. To grant access, invite the person to that channel; to revoke it, remove them. Nothing has to be edited or redeployed, and the list is visible in Slack to the people who maintain it.
+
+The channel narrows the existing rule — it never widens it. A person must still have bound their Slack account and still be a member of the Multica workspace; the channel decides which of those members are in scope. Being in the channel does not make somebody a workspace member.
+
+To find the id, open the channel in Slack, click its name, and copy the **Channel ID** at the bottom of the dialog.
+
+Removals take effect within about 30 seconds. Invite the Bot to the channel before setting the policy — it cannot read a channel it is not in, and the request is rejected if it is not.
+
+<Callout type="warning">
+The channel must be **private**. Anyone can join a public channel, which would let anyone authorize themselves. Multica verifies this rather than trusting the setting: a public channel is rejected when the policy is saved, and re-checked on every roster refresh — so converting the channel to public later closes the Bot immediately instead of quietly widening who it serves.
+</Callout>
+
+Reading the channel needs the `groups:read` Bot scope. If Slack cannot be reached, the Bot keeps using the last known membership for up to 15 minutes so an outage does not silence it. A stale list can only keep serving people who were already on it — nobody new is admitted — so an outage delays a removal instead of granting access. After 15 minutes it stops guessing and closes. A channel that has turned public, or that the Bot has been removed from, is not an outage and gets no grace at all.
+
+<Callout type="warning">
+Authorizing a group chat reads its participant list, which needs the `mpim:read` Bot scope. Without it the list cannot be read, and a Bot set to `members_only` closes every group chat rather than guessing. Add the scope to the manifest and reinstall the app before relying on group chats.
+</Callout>
+
 ## Manage connections
 
 Open **Settings → Integrations** to view all connected Slack Bots. Workspace owners and admins can disconnect them.
@@ -166,7 +227,10 @@ Account binding links use `MULTICA_APP_URL`, falling back to `FRONTEND_ORIGIN` w
 - **Invalid token when connecting**: check the prefixes and confirm both tokens come from the same app.
 - **App can't be verified**: confirm the manifest includes `users:read`, then reinstall the app after updating permissions.
 - **No DM entry point**: confirm `app_home.messages_tab_enabled` is `true`.
-- **No reply in a channel**: confirm the Bot has been invited to the channel and the message @-mentions it.
+- **No reply in a channel**: confirm the Bot has been invited to the channel and the message @-mentions it. If the installation uses `members_only`, also confirm the channel id is in its allowed channel list.
+- **"Not available in this channel"**: the sender is authorized but the conversation is not — add the channel id to the installation's allowed channel list, or move the request to a DM.
+- **A group chat stopped working**: under `members_only` every participant must be a bound workspace member, and the app needs `mpim:read`. Reinstall after adding the scope.
+- **Everybody is refused after setting `auth_channel_id`**: confirm the Bot is still in that channel and the channel is still private. Both are re-checked continuously, and either one failing closes the Bot.
 - **`/issue` doesn't exist**: confirm the manifest includes the slash command and the `commands` scope, then reinstall the app.
 - **Files don't reach the agent**: confirm the manifest includes `files:read` and that the app was reinstalled after the scope was added, and check the file is 20 MiB or smaller.
 - **The Bot doesn't run**: check whether the agent is archived and whether the [runtime](/daemon-runtimes) it uses is online.
