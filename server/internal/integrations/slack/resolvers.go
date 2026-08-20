@@ -29,10 +29,19 @@ const originSlackChat = "slack_chat"
 // the processing reaction, and media stores inbound attachments. Each optional
 // dependency may be nil to disable only that capability while preserving normal
 // Slack message ingestion.
-func NewSlackResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.OutboundReplier, typing *TypingIndicatorManager, media engine.MediaResolver) engine.ResolverSet {
+//
+// Validated is the room guard (room_guard.go). It is not optional: the pipeline
+// runs it right after the sender gate, so conversation authorization and sender
+// authorization are decided in one place, ahead of any session or agent work.
+func NewSlackResolverSet(q *db.Queries, tx engine.TxStarter, decrypt Decrypter, replier engine.OutboundReplier, typing *TypingIndicatorManager, media engine.MediaResolver) engine.ResolverSet {
+	// One identity resolver serves both the sender gate and the room guard, so
+	// "authorized" is decided by a single predicate for the speaker and for
+	// everyone else sharing the conversation.
+	identity := &identityResolver{q: q}
 	set := engine.ResolverSet{
 		Installation: &installationResolver{q: q},
-		Identity:     &identityResolver{q: q},
+		Identity:     identity,
+		Validated:    newRoomGuard(identity, decrypt, nil),
 		Dedup:        &deduper{q: q},
 		Session: &sessionBinder{session: engine.NewChatSession(q, tx, TypeSlack, engine.SessionTitles{
 			Group:    "Slack channel",
@@ -247,6 +256,49 @@ func (r *identityResolver) ResolveSender(ctx context.Context, inst engine.Resolv
 		}
 	}
 	return engine.ResolvedIdentity{UserID: binding.MulticaUserID}, nil
+}
+
+// authorizedSlackUser reports whether slackUserID is bound to a Multica user
+// who is STILL a member of the installation's workspace — the same predicate
+// ResolveSender enforces for the sender, asked about somebody else.
+//
+// It is deliberately read-only. ResolveSender materializes a reused link as a
+// binding on this installation because the sender just proved they are here;
+// the room guard asks about the OTHER people sharing a multi-party DM, and
+// writing a binding row for a bystander would be inventing consent they never
+// gave. Keeping both callers on one predicate is what makes "authorized" mean
+// one thing in this adapter.
+func (r *identityResolver) authorizedSlackUser(ctx context.Context, inst engine.ResolvedInstallation, slackUserID string) (bool, error) {
+	if slackUserID == "" {
+		return false, nil
+	}
+	binding, err := r.q.GetChannelUserBindingByUserID(ctx, db.GetChannelUserBindingByUserIDParams{
+		InstallationID: inst.ID,
+		ChannelUserID:  slackUserID,
+	})
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return false, err
+		}
+		cand, ok, ferr := r.reusableBinding(ctx, inst, slackUserID)
+		if ferr != nil {
+			return false, ferr
+		}
+		if !ok {
+			return false, nil
+		}
+		binding = cand
+	}
+	if _, err := r.q.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+		UserID:      binding.MulticaUserID,
+		WorkspaceID: inst.WorkspaceID,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // reusableBinding looks for a link the same Slack user already made to ANOTHER

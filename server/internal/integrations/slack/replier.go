@@ -117,6 +117,10 @@ func (r *OutboundReplier) Reply(ctx context.Context, inst engine.ResolvedInstall
 	switch res.Outcome {
 	case engine.OutcomeNeedsBinding:
 		r.replyUnauthorizedSender(ctx, inst, msg, res)
+	case engine.OutcomeRoomDenied:
+		r.replyRoomDenied(ctx, inst, msg, res)
+	case engine.OutcomeSenderDenied:
+		r.replySenderDenied(ctx, inst, msg, res)
 	case engine.OutcomeAgentOffline:
 		if err := r.post(ctx, inst, msg, agentOfflineText); err != nil {
 			r.logger.WarnContext(ctx, "slack replier: offline notice failed",
@@ -153,16 +157,23 @@ func (r *OutboundReplier) Reply(ctx context.Context, inst engine.ResolvedInstall
 	}
 }
 
-// replyUnauthorizedSender answers somebody the identity gate turned away, by
-// offering them the link that binds their Slack account.
+// replyUnauthorizedSender answers somebody the identity gate turned away.
 //
-// Two things decide what happens. The cooldown comes first: a person who has
-// already been answered gets nothing at all, so repeated messages cannot be
-// used to make the bot talk on demand or to mint an unbounded number of binding
-// tokens. Then the room. Anywhere other people can see, the offer goes out
-// ephemerally — a "link your account" card posted into a channel announces that
-// a bot is standing there and invites the rest of the room to ask about it, and
-// the offer is no use to any of them anyway.
+// Two things decide what happens, in order:
+//
+//  1. The cooldown. A person who has already been answered gets nothing at all,
+//     so repeated messages cannot be used to make the bot talk on demand, and a
+//     stranger cannot mint an unbounded number of binding tokens.
+//  2. The installation's gate. An installation left at the product default
+//     still offers the link that binds a workspace member's Slack account —
+//     for a BYO install that prompt is the only way anybody creates their first
+//     binding. One set to members_only says the refusal and nothing else: no
+//     product name, no link, no hint that there is a way in.
+//
+// Where it is said is not a policy choice. Anywhere other people can read it,
+// the answer goes out ephemerally: a "link your account" card posted into a
+// channel announces that a gated bot is standing there, and a visible refusal
+// invites the rest of the room to ask why they cannot use it.
 func (r *OutboundReplier) replyUnauthorizedSender(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, res engine.Result) {
 	sender := res.Sender
 	if sender == "" {
@@ -172,13 +183,50 @@ func (r *OutboundReplier) replyUnauthorizedSender(ctx context.Context, inst engi
 		return
 	}
 	r.logRefusal(ctx, inst, msg, sender, "sender is not a bound workspace member")
-	text, err := r.bindingPrompt(ctx, inst, sender)
-	if err != nil {
-		r.logger.WarnContext(ctx, "slack replier: binding prompt failed",
-			"installation_id", util.UUIDToString(inst.ID), "error", err)
-		return
+
+	text := r.installationPolicy(inst).refusal()
+	if r.installationGate(inst) != ChatGateMembersOnly {
+		prompt, err := r.bindingPrompt(ctx, inst, sender)
+		if err != nil {
+			r.logger.WarnContext(ctx, "slack replier: binding prompt failed",
+				"installation_id", util.UUIDToString(inst.ID), "error", err)
+			return
+		}
+		text = prompt
 	}
 	r.deliver(ctx, inst, msg, sender, text)
+}
+
+// replySenderDenied answers somebody this installation does not permit to use
+// the bot at all. It says so plainly rather than blaming the location: a person
+// told the bot is unavailable *here* will reasonably go and try somewhere else,
+// which is a worse outcome for them and a noisier one for everybody watching.
+func (r *OutboundReplier) replySenderDenied(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, res engine.Result) {
+	sender := res.Sender
+	if sender == "" {
+		sender = msg.Source.SenderID
+	}
+	if !r.refusals.allow(inst.ID, sender) {
+		return
+	}
+	r.logRefusal(ctx, inst, msg, sender, "sender is not on the authorization roster")
+	r.deliver(ctx, inst, msg, sender, r.installationPolicy(inst).refusal())
+}
+
+// replyRoomDenied answers an authorized person in an unauthorized room. The
+// wording names the place, not the person, because the same request in a direct
+// message would have been served. It is always ephemeral: the whole reason the
+// room was denied is that its other occupants must not receive the bot's output.
+func (r *OutboundReplier) replyRoomDenied(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, res engine.Result) {
+	sender := res.Sender
+	if sender == "" {
+		sender = msg.Source.SenderID
+	}
+	if !r.refusals.allow(inst.ID, sender) {
+		return
+	}
+	r.logRefusal(ctx, inst, msg, sender, "conversation is not authorized")
+	r.postEphemeral(ctx, inst, msg, sender, WrongPlaceText)
 }
 
 // deliver sends one notice to the person it concerns: visibly in a direct
@@ -192,6 +240,23 @@ func (r *OutboundReplier) deliver(ctx context.Context, inst engine.ResolvedInsta
 		r.logger.WarnContext(ctx, "slack replier: notice failed",
 			"installation_id", util.UUIDToString(inst.ID), "error", err)
 	}
+}
+
+// installationPolicy reads the access policy off the carried installation row.
+// An installation whose row is unavailable falls back to the product default —
+// the sender has already been refused entry by then, so this only decides what
+// they are told and whether they are handed an onboarding link they still
+// cannot redeem without a workspace membership.
+func (r *OutboundReplier) installationPolicy(inst engine.ResolvedInstallation) roomPolicy {
+	row, ok := inst.Platform.(db.ChannelInstallation)
+	if !ok {
+		return roomPolicy{gate: ChatGateOpen}
+	}
+	return decodeRoomPolicy(row.Config)
+}
+
+func (r *OutboundReplier) installationGate(inst engine.ResolvedInstallation) ChatGate {
+	return r.installationPolicy(inst).gate
 }
 
 // logRefusal records one denial: who, where, and what kind of conversation.

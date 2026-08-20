@@ -345,6 +345,24 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 					Sender:         msg.Source.SenderID,
 				}, finalizeMark, nil
 			}
+			if errors.Is(err, ErrRoomNotAuthorized) {
+				_ = set.Audit.RecordDrop(ctx, inst.ID, msg, DropReasonRoomNotAuthorized)
+				return Result{
+					Outcome:        OutcomeRoomDenied,
+					DropReason:     DropReasonRoomNotAuthorized,
+					InstallationID: inst.ID,
+					Sender:         msg.Source.SenderID,
+				}, finalizeMark, nil
+			}
+			if errors.Is(err, ErrSenderNotPermitted) {
+				_ = set.Audit.RecordDrop(ctx, inst.ID, msg, DropReasonSenderNotPermitted)
+				return Result{
+					Outcome:        OutcomeSenderDenied,
+					DropReason:     DropReasonSenderNotPermitted,
+					InstallationID: inst.ID,
+					Sender:         msg.Source.SenderID,
+				}, finalizeMark, nil
+			}
 			return Result{}, finalizeRelease, fmt.Errorf("resolve validated inbound route: %w", err)
 		}
 	}
@@ -367,6 +385,25 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 		if errors.Is(routeErr, ErrTargetAgentArchived) {
 			return Result{
 				Outcome:        OutcomeAgentArchived,
+				InstallationID: inst.ID,
+				Sender:         msg.Source.SenderID,
+			}, true, nil
+		}
+		// The room guard can flip to denied between the first resolve and this
+		// retry (a membership change inside a multi-party DM). Honour it here
+		// too rather than surfacing an infrastructure error.
+		if errors.Is(routeErr, ErrRoomNotAuthorized) {
+			return Result{
+				Outcome:        OutcomeRoomDenied,
+				DropReason:     DropReasonRoomNotAuthorized,
+				InstallationID: inst.ID,
+				Sender:         msg.Source.SenderID,
+			}, true, nil
+		}
+		if errors.Is(routeErr, ErrSenderNotPermitted) {
+			return Result{
+				Outcome:        OutcomeSenderDenied,
+				DropReason:     DropReasonSenderNotPermitted,
 				InstallationID: inst.ID,
 				Sender:         msg.Source.SenderID,
 			}, true, nil

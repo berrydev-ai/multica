@@ -335,12 +335,88 @@ func textOrEmpty(m *channel.OutboundMessage) string {
 	return m.Text
 }
 
-// --- notice delivery -------------------------------------------------------
+// --- refusal behavior -------------------------------------------------------
 //
-// The cooldown's own matrix lives in refusal_test.go. What follows is the
-// wiring: which Slack call each notice takes, and that a channel never sees one.
+// The canonical matrix for the cooldown itself lives in refusal_test.go and the
+// conversation rules in room_guard_test.go. What follows is the wiring: which
+// Slack call each refusal takes, and what it is allowed to say.
+
+// membersOnlyInstallation is an installation whose bindings are complete, so an
+// unbound sender is turned away instead of onboarded.
+func membersOnlyInstallation(t *testing.T) engine.ResolvedInstallation {
+	t.Helper()
+	inst := testResolvedInstallation(t)
+	inst.Platform = db.ChannelInstallation{
+		Config: []byte(`{"app_id":"T1","bot_user_id":"UBOT","bot_token_encrypted":"eG94Yi10ZXN0","chat_gate":"members_only"}`),
+	}
+	return inst
+}
+
+func TestReply_UnauthorizedDM_RefusesOnceAndRevealsNothing(t *testing.T) {
+	sender := &fakeReplySender{}
+	minter := &fakeBindingMinter{raw: "tok_RAW-123"}
+	r := newTestReplier(minter, sender)
+	inst := membersOnlyInstallation(t)
+	msg := testInboundDMForReply()
+	result := engine.Result{Outcome: engine.OutcomeNeedsBinding, Sender: "UALICE"}
+
+	r.Reply(context.Background(), inst, msg, result)
+
+	if sender.calls != 1 || sender.sent == nil {
+		t.Fatalf("expected exactly one refusal, got %d", sender.calls)
+	}
+	if sender.sent.Text != RefusalText {
+		t.Errorf("refusal text = %q, want the single constant %q", sender.sent.Text, RefusalText)
+	}
+	if minter.calls != 0 {
+		t.Error("a members-only installation must not mint a binding token for a stranger")
+	}
+	// Nothing in the refusal may identify the product, the project, or a way in.
+	for _, leak := range []string{"Multica", "multica.example", "link", "http"} {
+		if strings.Contains(strings.ToLower(sender.sent.Text), strings.ToLower(leak)) {
+			t.Errorf("refusal text %q leaks %q", sender.sent.Text, leak)
+		}
+	}
+
+	// A second message inside the cooldown is answered with silence, so nobody
+	// can make the bot talk on demand by repeating themselves.
+	r.Reply(context.Background(), inst, msg, result)
+	if sender.calls != 1 {
+		t.Fatalf("sends = %d, want the repeat message to be ignored entirely", sender.calls)
+	}
+}
 
 func TestReply_UnauthorizedMentionInChannel_IsEphemeralOnly(t *testing.T) {
+	sender := &fakeReplySender{}
+	r := newTestReplier(&fakeBindingMinter{raw: "tok_RAW-123"}, sender)
+
+	r.Reply(context.Background(), membersOnlyInstallation(t), testInboundForReply(), engine.Result{
+		Outcome: engine.OutcomeNeedsBinding,
+		Sender:  "UALICE",
+	})
+
+	if sender.calls != 0 {
+		t.Fatalf("chat.postMessage calls = %d, want 0: a visible refusal announces the bot to the whole channel", sender.calls)
+	}
+	if sender.ephemeralCalls != 1 || sender.ephemeral == nil {
+		t.Fatalf("chat.postEphemeral calls = %d, want 1", sender.ephemeralCalls)
+	}
+	if sender.ephemeral.Text != RefusalText {
+		t.Errorf("refusal text = %q, want %q", sender.ephemeral.Text, RefusalText)
+	}
+	if sender.ephemeralUser != "UALICE" {
+		t.Errorf("ephemeral target = %q, want the person who spoke", sender.ephemeralUser)
+	}
+	if sender.ephemeral.ChatID != "C1" {
+		t.Errorf("ephemeral channel = %q, want the originating channel", sender.ephemeral.ChatID)
+	}
+}
+
+// An ungated installation still onboards somebody whose first contact is a
+// channel mention — that is the product's normal first-use path and breaking it
+// would strand every member who mentions the bot before DMing it. What changes
+// is who can read the offer: only the person who asked.
+func TestReply_OpenInstallation_OnboardsInChannelWithoutTellingTheRoom(t *testing.T) {
 	sender := &fakeReplySender{}
 	minter := &fakeBindingMinter{raw: "tok_RAW-123"}
 	r := newTestReplier(minter, sender)
@@ -356,56 +432,17 @@ func TestReply_UnauthorizedMentionInChannel_IsEphemeralOnly(t *testing.T) {
 	if sender.ephemeralCalls != 1 || sender.ephemeral == nil {
 		t.Fatalf("chat.postEphemeral calls = %d, want 1", sender.ephemeralCalls)
 	}
-	if sender.ephemeralUser != "UALICE" {
-		t.Errorf("ephemeral target = %q, want the person who spoke", sender.ephemeralUser)
-	}
-	if sender.ephemeral.ChatID != "C1" {
-		t.Errorf("ephemeral channel = %q, want the originating channel", sender.ephemeral.ChatID)
-	}
-	// Still a real, redeemable offer — only the audience changed.
-	if minter.calls != 1 || !strings.Contains(sender.ephemeral.Text, "tok_RAW-123") {
-		t.Errorf("Mint calls = %d, text = %q", minter.calls, sender.ephemeral.Text)
-	}
-}
-
-// Without a cooldown the prompt is a megaphone: anyone can make the bot speak on
-// demand, and every message mints another single-use token.
-func TestReply_RepeatedUnboundMessages_AnswerOnce(t *testing.T) {
-	sender := &fakeReplySender{}
-	minter := &fakeBindingMinter{raw: "tok_RAW-123"}
-	r := newTestReplier(minter, sender)
-	inst := testResolvedInstallation(t)
-	msg := testInboundDMForReply()
-	result := engine.Result{Outcome: engine.OutcomeNeedsBinding, Sender: "UALICE"}
-
-	for range 4 {
-		r.Reply(context.Background(), inst, msg, result)
-	}
-
-	if sender.calls != 1 {
-		t.Fatalf("replies = %d, want exactly one inside the cooldown", sender.calls)
-	}
 	if minter.calls != 1 {
-		t.Errorf("Mint calls = %d, want one token, not one per message", minter.calls)
+		t.Errorf("Mint called %d times, want the offer to still be a real, redeemable link", minter.calls)
+	}
+	if !strings.Contains(sender.ephemeral.Text, "tok_RAW-123") {
+		t.Errorf("ephemeral prompt = %q, want it to carry the minted token", sender.ephemeral.Text)
 	}
 }
 
-func TestReply_EphemeralFailureFallsBackToSilence(t *testing.T) {
-	sender := &fakeReplySender{ephemeralErr: errors.New("channel_not_found")}
-	r := newTestReplier(&fakeBindingMinter{raw: "tok"}, sender)
-
-	r.Reply(context.Background(), testResolvedInstallation(t), testInboundForReply(), engine.Result{
-		Outcome: engine.OutcomeNeedsBinding,
-		Sender:  "UALICE",
-	})
-
-	if sender.calls != 0 {
-		t.Fatalf("chat.postMessage calls = %d: a failed ephemeral must never fall back to a visible post", sender.calls)
-	}
-}
-
-// A prompt that cannot be built is not downgraded into a bare message the
-// recipient cannot act on: say nothing, log it, try again after the cooldown.
+// A failure to mint must not degrade into a bland refusal that a member cannot
+// act on: say nothing, log it, and let the next message (after the cooldown)
+// try again.
 func TestReply_BindingPromptFailure_SaysNothing(t *testing.T) {
 	sender := &fakeReplySender{}
 	r := newTestReplier(&fakeBindingMinter{raw: "tok"}, sender)
@@ -421,17 +458,130 @@ func TestReply_BindingPromptFailure_SaysNothing(t *testing.T) {
 	}
 }
 
-// The Result carries the sender for exactly this reason: a notice has to be
+func TestReply_RoomDenied_NamesThePlaceNotThePerson(t *testing.T) {
+	sender := &fakeReplySender{}
+	r := newTestReplier(&fakeBindingMinter{}, sender)
+	msg := testInboundForReply()
+	result := engine.Result{Outcome: engine.OutcomeRoomDenied, Sender: "UALICE"}
+
+	r.Reply(context.Background(), testResolvedInstallation(t), msg, result)
+
+	if sender.calls != 0 {
+		t.Fatalf("chat.postMessage calls = %d, want 0", sender.calls)
+	}
+	if sender.ephemeralCalls != 1 || sender.ephemeral == nil {
+		t.Fatalf("chat.postEphemeral calls = %d, want 1", sender.ephemeralCalls)
+	}
+	if sender.ephemeral.Text != WrongPlaceText {
+		t.Errorf("text = %q, want %q — the speaker is authorized, the room is not", sender.ephemeral.Text, WrongPlaceText)
+	}
+
+	r.Reply(context.Background(), testResolvedInstallation(t), msg, result)
+	if sender.ephemeralCalls != 1 {
+		t.Errorf("ephemeral calls = %d, want the cooldown to cover room denials too", sender.ephemeralCalls)
+	}
+}
+
+func TestReply_EphemeralFailureFallsBackToSilence(t *testing.T) {
+	sender := &fakeReplySender{ephemeralErr: errors.New("channel_not_found")}
+	r := newTestReplier(&fakeBindingMinter{}, sender)
+
+	r.Reply(context.Background(), testResolvedInstallation(t), testInboundForReply(), engine.Result{
+		Outcome: engine.OutcomeRoomDenied,
+		Sender:  "UALICE",
+	})
+
+	if sender.calls != 0 {
+		t.Fatalf("chat.postMessage calls = %d: a failed ephemeral must never fall back to a visible post", sender.calls)
+	}
+}
+
+// The Result carries the sender for exactly this reason: a refusal has to be
 // addressable even when the reply path only sees the envelope.
 func TestReply_FallsBackToTheEnvelopeSender(t *testing.T) {
 	sender := &fakeReplySender{}
-	r := newTestReplier(&fakeBindingMinter{raw: "tok"}, sender)
+	r := newTestReplier(&fakeBindingMinter{}, sender)
 
 	r.Reply(context.Background(), testResolvedInstallation(t), testInboundForReply(), engine.Result{
-		Outcome: engine.OutcomeNeedsBinding,
+		Outcome: engine.OutcomeRoomDenied,
 	})
 
 	if sender.ephemeralUser != "UALICE" {
 		t.Errorf("ephemeral target = %q, want the envelope's sender", sender.ephemeralUser)
+	}
+}
+
+// A person this installation does not permit is told so, in the installation's
+// own words, and only they can read it.
+func TestReply_SenderDenied_UsesTheConfiguredRefusal(t *testing.T) {
+	const want = "Not an authorized Mika operator"
+	inst := testResolvedInstallation(t)
+	inst.Platform = db.ChannelInstallation{
+		Config: []byte(`{"app_id":"T1","bot_user_id":"UBOT","bot_token_encrypted":"eG94Yi10ZXN0","chat_gate":"members_only","refusal_text":"` + want + `"}`),
+	}
+	sender := &fakeReplySender{}
+	r := newTestReplier(&fakeBindingMinter{}, sender)
+	msg := testInboundForReply()
+	result := engine.Result{Outcome: engine.OutcomeSenderDenied, Sender: "UALICE"}
+
+	r.Reply(context.Background(), inst, msg, result)
+
+	if sender.calls != 0 {
+		t.Fatalf("chat.postMessage calls = %d, want 0: the rest of the channel is not part of this", sender.calls)
+	}
+	if sender.ephemeralCalls != 1 || sender.ephemeral == nil {
+		t.Fatalf("chat.postEphemeral calls = %d, want 1", sender.ephemeralCalls)
+	}
+	if sender.ephemeral.Text != want {
+		t.Errorf("text = %q, want %q", sender.ephemeral.Text, want)
+	}
+
+	// Same cooldown as every other refusal: one answer per person per day.
+	r.Reply(context.Background(), inst, msg, result)
+	if sender.ephemeralCalls != 1 {
+		t.Errorf("ephemeral calls = %d, want the repeat ignored", sender.ephemeralCalls)
+	}
+}
+
+// The two denials must not be swapped. Telling somebody who may never use the
+// bot that it is "not available in this channel" sends them to try the next one.
+func TestReply_SenderDeniedAndRoomDeniedSayDifferentThings(t *testing.T) {
+	for _, tc := range []struct {
+		outcome engine.Outcome
+		want    string
+	}{
+		{engine.OutcomeSenderDenied, RefusalText},
+		{engine.OutcomeRoomDenied, WrongPlaceText},
+	} {
+		sender := &fakeReplySender{}
+		r := newTestReplier(&fakeBindingMinter{}, sender)
+		r.Reply(context.Background(), membersOnlyInstallation(t), testInboundForReply(), engine.Result{
+			Outcome: tc.outcome,
+			Sender:  "UALICE",
+		})
+		if sender.ephemeral == nil || sender.ephemeral.Text != tc.want {
+			t.Errorf("%s replied %v, want %q", tc.outcome, sender.ephemeral, tc.want)
+		}
+	}
+}
+
+// An unbound sender at a members-only installation gets the same configured
+// wording, so one person never sees two different explanations for one door.
+func TestReply_UnauthorizedDM_UsesTheConfiguredRefusal(t *testing.T) {
+	const want = "Not an authorized Mika operator"
+	inst := testResolvedInstallation(t)
+	inst.Platform = db.ChannelInstallation{
+		Config: []byte(`{"app_id":"T1","bot_user_id":"UBOT","bot_token_encrypted":"eG94Yi10ZXN0","chat_gate":"members_only","refusal_text":"` + want + `"}`),
+	}
+	sender := &fakeReplySender{}
+	r := newTestReplier(&fakeBindingMinter{}, sender)
+
+	r.Reply(context.Background(), inst, testInboundDMForReply(), engine.Result{
+		Outcome: engine.OutcomeNeedsBinding,
+		Sender:  "UALICE",
+	})
+
+	if sender.sent == nil || sender.sent.Text != want {
+		t.Errorf("text = %v, want %q", sender.sent, want)
 	}
 }

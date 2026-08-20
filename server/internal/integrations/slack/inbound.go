@@ -20,6 +20,14 @@ import (
 // slackRawEvent carries the Slack-specific fields the cross-platform envelope
 // does not — read back only inside the Slack resolvers (team_id routes the
 // installation; the core never reads Raw).
+//
+// ChannelType carries Slack's OWN channel_type ("im", "mpim", "channel",
+// "group", "private_channel") rather than the normalized ChatType, which the
+// core already has on Source.ChatType. The room guard needs the native value:
+// a multi-party DM and a private channel both normalize to "group", and they
+// are authorized by different rules. An app_mention payload carries no
+// channel_type, so the field is empty there and the guard treats the
+// conversation as a channel — the stricter of the two.
 type slackRawEvent struct {
 	TeamID      string         `json:"team_id"`
 	APIAppID    string         `json:"api_app_id,omitempty"`
@@ -121,6 +129,7 @@ func inboundFromMessage(e slackevents.EventsAPIEvent, m *slackevents.MessageEven
 		ts:        m.TimeStamp,
 		threadTS:  m.ThreadTimeStamp,
 		chatType:  chatType,
+		slackType: m.ChannelType,
 		addressed: addressed,
 		files:     files,
 	}, mentionRe), true
@@ -157,6 +166,9 @@ type buildInboundParams struct {
 	ts        string
 	threadTS  string
 	chatType  channel.ChatType
+	// slackType is Slack's own channel_type verbatim, empty when the event
+	// does not carry one (app_mention).
+	slackType string
 	addressed bool
 	files     []slackRawFile
 }
@@ -167,7 +179,7 @@ func buildInbound(e slackevents.EventsAPIEvent, p buildInboundParams, mentionRe 
 		APIAppID:    e.APIAppID,
 		EventType:   p.eventType,
 		SubType:     p.subType,
-		ChannelType: string(p.chatType),
+		ChannelType: p.slackType,
 		Files:       p.files,
 	})
 	var reply *channel.ReplyCtx

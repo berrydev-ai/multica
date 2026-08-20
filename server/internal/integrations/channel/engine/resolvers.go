@@ -30,6 +30,17 @@ const (
 	OutcomeIssueUsage    Outcome = "issue_usage"
 	OutcomeAgentOffline  Outcome = "agent_offline"
 	OutcomeAgentArchived Outcome = "agent_archived"
+	// OutcomeRoomDenied: the sender passed the identity gate but the
+	// CONVERSATION is not authorized to receive substantive work (see
+	// ValidatedInboundResolver). Repliers answer with a terminal refusal that
+	// is not visible to the rest of the room.
+	OutcomeRoomDenied Outcome = "room_denied"
+	// OutcomeSenderDenied: the CONVERSATION would have been fine; this person
+	// may not use the bot. Kept distinct from OutcomeRoomDenied so the reply can
+	// name the real reason — telling somebody the bot is unavailable here, when
+	// it would be unavailable to them anywhere, sends them to try the next
+	// channel instead of to whoever grants access.
+	OutcomeSenderDenied Outcome = "sender_denied"
 )
 
 // DropReason enumerates the drop-audit categories. Values match the legacy
@@ -43,6 +54,8 @@ const (
 	DropReasonDuplicate           DropReason = "duplicate"
 	DropReasonRevokedInstallation DropReason = "revoked_installation"
 	DropReasonInvalidEvent        DropReason = "invalid_event"
+	DropReasonRoomNotAuthorized   DropReason = "room_not_authorized"
+	DropReasonSenderNotPermitted  DropReason = "sender_not_permitted"
 )
 
 // Result is the typed verdict the Router produces for one inbound message,
@@ -174,6 +187,17 @@ var (
 	// the Router returns the normal archived-agent product outcome without
 	// creating a session or enqueueing work while the target is unavailable.
 	ErrTargetAgentArchived = errors.New("engine: routed agent is archived")
+	// ErrRoomNotAuthorized: the sender is bound and a member, but the
+	// conversation itself is not authorized for substantive work — an
+	// un-allowlisted channel, or a multi-party DM that contains someone who is
+	// not. Platforms return it from ResolveValidatedInbound so the decision
+	// still lands in ONE gate, ahead of session creation and any agent work.
+	ErrRoomNotAuthorized = errors.New("engine: conversation is not authorized")
+	// ErrSenderNotPermitted: the sender is bound and a member, but this
+	// installation does not permit them to use the bot at all — they are not on
+	// its authorization roster. Distinct from ErrRoomNotAuthorized, which is
+	// about the place rather than the person.
+	ErrSenderNotPermitted = errors.New("engine: sender is not permitted to use this bot")
 	// ErrRouteChanged asks the Router to resolve the platform route again and
 	// retry the same claimed message. The durable append must return this before
 	// writing when an administrator changed the route revision concurrently.

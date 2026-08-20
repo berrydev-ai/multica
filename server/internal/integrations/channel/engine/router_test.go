@@ -675,6 +675,43 @@ func TestRouter_ArchivedValidatedRouteRepliesWithoutCreatingSession(t *testing.T
 	}
 }
 
+func TestRouter_RoomNotAuthorized_RefusesWithoutCreatingSession(t *testing.T) {
+	h := newHarness(t)
+	h.validated.err = ErrRoomNotAuthorized
+	msg := p2pMessage(t)
+	msg.Source.ChatType = channel.ChatTypeGroup
+	msg.AddressedToBot = true
+
+	if err := h.router.Handle(context.Background(), msg); err != nil {
+		t.Fatalf("an unauthorized room is a product outcome, not an error: %v", err)
+	}
+	// The point of the gate: an unauthorized conversation costs a membership
+	// lookup and nothing else. No session means no message row, no task, and
+	// no agent run — so no model call and no repository access can follow.
+	if h.binder.lastEnsure.Installation.ID.Valid {
+		t.Fatal("an unauthorized room must not create or reuse a chat session")
+	}
+	if h.media.calls() != 0 {
+		t.Fatal("an unauthorized room must not resolve media")
+	}
+	if r, _ := h.audit.last(); r != DropReasonRoomNotAuthorized {
+		t.Fatalf("expected a room_not_authorized audit, got %q", r)
+	}
+	if h.dedup.marks() != 1 {
+		t.Fatalf("a room denial must finalize dedup, got %d marks", h.dedup.marks())
+	}
+	if !waitFor(time.Second, func() bool {
+		for _, result := range h.replier.calls() {
+			if result.Outcome == OutcomeRoomDenied && result.Sender == msg.Source.SenderID {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("a room denial must reach the replier carrying the sender to answer")
+	}
+}
+
 func TestRouter_RouteFenceConflictRefreshesAndRetriesSameClaim(t *testing.T) {
 	h := newHarness(t)
 	oldRoute := activeResolved(t)
@@ -2100,5 +2137,34 @@ func TestRouter_MediaDeadlineStartsBeforeAppend(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("resolver did not run")
+	}
+}
+
+func TestRouter_SenderNotPermitted_RefusesWithoutCreatingSession(t *testing.T) {
+	h := newHarness(t)
+	h.validated.err = ErrSenderNotPermitted
+	msg := p2pMessage(t)
+
+	if err := h.router.Handle(context.Background(), msg); err != nil {
+		t.Fatalf("an unpermitted sender is a product outcome, not an error: %v", err)
+	}
+	if h.binder.lastEnsure.Installation.ID.Valid {
+		t.Fatal("an unpermitted sender must not create or reuse a chat session")
+	}
+	if h.media.calls() != 0 {
+		t.Fatal("an unpermitted sender must not resolve media")
+	}
+	if r, _ := h.audit.last(); r != DropReasonSenderNotPermitted {
+		t.Fatalf("expected a sender_not_permitted audit, got %q", r)
+	}
+	if !waitFor(time.Second, func() bool {
+		for _, result := range h.replier.calls() {
+			if result.Outcome == OutcomeSenderDenied && result.Sender == msg.Source.SenderID {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("a sender denial must reach the replier carrying the sender to answer")
 	}
 }

@@ -144,11 +144,74 @@ func TestInboundFromMessage_SkipsBotAndOwnAndEdits(t *testing.T) {
 		{"edit", &slackevents.MessageEvent{User: "UALICE", SubType: "message_changed", Text: "hi", Channel: "C1", TimeStamp: "1.4"}},
 		{"delete", &slackevents.MessageEvent{User: "UALICE", SubType: "message_deleted", Channel: "C1", TimeStamp: "1.5"}},
 		{"empty user", &slackevents.MessageEvent{Text: "hi", Channel: "C1", TimeStamp: "1.6"}},
+		{"join", &slackevents.MessageEvent{User: "UALICE", SubType: "channel_join", Channel: "C1", TimeStamp: "1.7"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, ok := translateMessage("UBOT", eventsAPI(nil), tc.m); ok {
 				t.Errorf("%s should not be ingested", tc.name)
+			}
+		})
+	}
+}
+
+// The room guard authorizes a multi-party DM by its membership and a channel by
+// an allowlist, so it needs Slack's own channel_type — the normalized ChatType
+// collapses the two into "group". app_mention carries no channel_type, and the
+// guard reads that absence as the stricter case.
+func TestInboundCarriesSlackChannelType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  func(t *testing.T) channel.InboundMessage
+		want string
+	}{
+		{
+			name: "multi-party DM",
+			got: func(t *testing.T) channel.InboundMessage {
+				m, ok := translateMessage("UBOT", eventsAPI(nil), &slackevents.MessageEvent{
+					User: "UALICE", Text: "<@UBOT> hi", Channel: "G1", ChannelType: "mpim", TimeStamp: "1.1",
+				})
+				if !ok {
+					t.Fatal("a mentioned mpim message must be ingested")
+				}
+				return m
+			},
+			want: "mpim",
+		},
+		{
+			name: "channel",
+			got: func(t *testing.T) channel.InboundMessage {
+				m, ok := translateMessage("UBOT", eventsAPI(nil), &slackevents.MessageEvent{
+					User: "UALICE", Text: "<@UBOT> hi", Channel: "C1", ChannelType: "channel", TimeStamp: "1.2",
+				})
+				if !ok {
+					t.Fatal("a mentioned channel message must be ingested")
+				}
+				return m
+			},
+			want: "channel",
+		},
+		{
+			name: "app_mention carries none",
+			got: func(t *testing.T) channel.InboundMessage {
+				m, ok := translateAppMention("UBOT", eventsAPI(nil), &slackevents.AppMentionEvent{
+					User: "UALICE", Text: "<@UBOT> hi", Channel: "C1", TimeStamp: "1.3",
+				})
+				if !ok {
+					t.Fatal("an app_mention must be ingested")
+				}
+				return m
+			},
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw slackRawEvent
+			if err := json.Unmarshal(tc.got(t).Raw, &raw); err != nil {
+				t.Fatalf("decode raw: %v", err)
+			}
+			if raw.ChannelType != tc.want {
+				t.Errorf("raw channel_type = %q, want %q", raw.ChannelType, tc.want)
 			}
 		})
 	}
