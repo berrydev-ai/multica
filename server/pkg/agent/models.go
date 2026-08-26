@@ -272,6 +272,14 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 		// ModelSelectionSupported. Return an empty list rather than spawning
 		// an ACP subprocess that can only ever come back empty.
 		return Catalog{Models: []Model{}}, nil
+	case "jcode":
+		// Jcode is ACP-native; session/new advertises the catalog under both
+		// `models.availableModels` and a `configOptions` model selector
+		// (verified against 0.80.x). Discovery runs against the same
+		// Multica-scoped persistent server tasks use — see discoverJcodeModels.
+		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
+			return discovered(discoverJcodeModels(ctx, runtimeCmd))
+		})
 	default:
 		return Catalog{}, fmt.Errorf("unknown agent type: %q", providerType)
 	}
@@ -1409,6 +1417,34 @@ func discoverHermesModels(ctx context.Context, runtimeCmd Command) ([]Model, err
 		return nil, annotateHermesDiscoveryUnconfigured(err)
 	}
 	return models, nil
+}
+
+// discoverJcodeModels enumerates Jcode's model catalog from session/new
+// (`models.availableModels` plus a `configOptions` model selector, verified
+// against jcode 0.80.x). The handshake is pinned to the same Multica-scoped
+// persistent server that task execution uses — JCODE_RUNTIME_DIR selects the
+// server's single-instance lock and JCODE_SOCKET its socket — so discovery
+// reuses (or autostarts) that server instead of colliding with the user's
+// interactive jcode servers. The session the handshake creates lives on the
+// persistent server after the shim exits; jcode's own session retention
+// prunes it.
+//
+// The session's current model carries jcode's `reasoning_effort` selector, so
+// the same annotate hook hermes uses records the effort vocabulary for the
+// thinking picker.
+func discoverJcodeModels(ctx context.Context, runtimeCmd Command) ([]Model, error) {
+	socket, runtimeDir, err := jcodeSocketPath()
+	if err != nil {
+		return []Model{}, nil
+	}
+	return discoverACPModels(ctx, runtimeCmd, acpDiscoveryProvider{
+		defaultBin:   "jcode",
+		clientName:   "multica-model-discovery",
+		acpArgs:      []string{"acp", "--no-update", "--quiet", "--no-selfdev"},
+		extraEnv:     []string{"JCODE_RUNTIME_DIR=" + runtimeDir, "JCODE_SOCKET=" + socket},
+		tmpdirPrefix: "multica-jcode-discovery-",
+		annotate:     annotateACPThinkingForSessionModel,
+	})
 }
 
 // hermesDiscoveryUnconfiguredHint explains a "no LLM provider configured"

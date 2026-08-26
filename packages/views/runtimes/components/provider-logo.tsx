@@ -367,6 +367,28 @@ function ZeroClawLogo({ className }: { className: string }) {
   );
 }
 
+// Jcode — no official brand asset has been sourced for this runtime yet, so
+// this is a deliberately simple placeholder mark (a terminal chevron and the
+// J descender) rather than a claimed "official" logo. currentColor keeps it
+// legible in both themes; swap for a real asset once one is sourced,
+// following the DimLogo <img> pattern.
+function JcodeLogo({ className }: { className: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M4 7l5 5-5 5" />
+      <path d="M19 5v10a4 4 0 0 1-7 2.6" />
+    </svg>
+  );
+}
+
 export function ProviderLogo({
   provider,
   className = "h-4 w-4",
@@ -424,6 +446,8 @@ export function ProviderLogo({
       return <DimLogo className={className} />;
     case "zeroclaw":
       return <ZeroClawLogo className={className} />;
+    case "jcode":
+      return <JcodeLogo className={className} />;
     default:
       return <Monitor className={className} />;
   }
