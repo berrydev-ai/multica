@@ -108,4 +108,20 @@ describe("ProviderLogo", () => {
     expect(logo?.querySelectorAll("path").length).toBe(3);
     expect(logo?.classList.contains("runtime-logo")).toBe(true);
   });
+
+  it("renders the Jcode placeholder mark instead of the generic fallback", () => {
+    const { container } = render(
+      <ProviderLogo provider="jcode" className="runtime-logo" />,
+    );
+
+    const logo = container.querySelector("svg");
+
+    // No official Jcode asset has been sourced yet, so this pins the
+    // deliberate placeholder mark (terminal chevron + J descender) rather
+    // than the generic <Monitor /> fallback that unknown providers get.
+    expect(logo?.getAttribute("viewBox")).toBe("0 0 24 24");
+    expect(logo?.getAttribute("stroke")).toBe("currentColor");
+    expect(logo?.querySelectorAll("path").length).toBe(2);
+    expect(logo?.classList.contains("runtime-logo")).toBe(true);
+  });
 });

@@ -278,7 +278,29 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	if e, ok := probe("MULTICA_ZEROCLAW_PATH", "zeroclaw", ""); ok {
 		agents["zeroclaw"] = e
 	}
+	// Jcode (`jcode`) executes through a persistent `jcode serve` daemon on a
+	// Multica-scoped socket, behind the upstream `jcode acp` stdio shim.
+	// Experimental rollout gate: the provider is detected only when
+	// MULTICA_EXPERIMENTAL_JCODE is set, so an installed jcode binary has zero
+	// effect on existing providers by default — no detection, no registration,
+	// and no `jcode serve` is ever started.
+	if experimentalJcodeEnabled() {
+		if e, ok := probe("MULTICA_JCODE_PATH", "jcode", "MULTICA_JCODE_MODEL"); ok {
+			agents["jcode"] = e
+		}
+	}
 	return agents
+}
+
+// experimentalJcodeEnabled reports whether the MULTICA_EXPERIMENTAL_JCODE
+// feature flag opts this daemon into the Jcode provider prototype.
+func experimentalJcodeEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MULTICA_EXPERIMENTAL_JCODE"))) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func probeDshMulticaProfile(executablePath string) bool {

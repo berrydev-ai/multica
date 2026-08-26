@@ -450,6 +450,7 @@ var launchPrefixBlockedArgs = map[string]map[string]blockedArgMode{
 	"deveco":      devecoBlockedArgs,
 	"grok":        grokBlockedArgs,
 	"hermes":      hermesBlockedArgs,
+	"jcode":       jcodeBlockedArgs,
 	"kimi":        kimiBlockedArgs,
 	"kiro":        kiroBlockedArgs,
 	"opencode":    opencodeBlockedArgs,

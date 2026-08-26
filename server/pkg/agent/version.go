@@ -19,6 +19,7 @@ var MinVersions = map[string]string{
 	"dim":      "0.3.10",  // cross-run session/load: per-process lock releases on graceful exit
 	"mcode":    "0.1.2",   // ACP v1 session/new, prompt, MCP capability forwarding
 	"zeroclaw": "0.8.0",   // persistent ACP sessions and session/resume were added in 0.8.0
+	"jcode":    "0.80.0",  // daemon-backed `jcode acp` contract (session/resume without replay, set_model, reasoning_effort, cancel ack) verified against 0.80.x
 }
 
 // MinQuickCreateCLIVersion gates the agent-create (quick-create) flow against

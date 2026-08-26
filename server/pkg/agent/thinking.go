@@ -851,6 +851,13 @@ var acpCatalogThinkingProviders = map[string]bool{
 	"hermes": true,
 	// dim (dimcode 0.3.10+): session/new advertises thought_level.
 	"dim": true,
+	// jcode as a first-party provider: session/new advertises option id
+	// `reasoning_effort` (category `thought_level`, verified against 0.80.x),
+	// jcodeBackend.Execute wires applyACPEffortOption, and the setting is
+	// known to reach the provider request (`reasoning.effort`), not just the
+	// config surface — the same jcode behavior already verified through the
+	// hermes-family entry above (GH #6720).
+	"jcode": true,
 }
 
 // usesDynamicThinkingCatalog reports whether a provider's effort vocabulary is

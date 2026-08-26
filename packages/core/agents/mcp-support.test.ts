@@ -32,6 +32,10 @@ describe("providerSupportsMcpConfig", () => {
     // ZeroClaw's ACP server never reads `params.mcpServers` — MCP lives in
     // ZeroClaw's own config-dir, so a value saved here could not be honoured.
     expect(providerSupportsMcpConfig("zeroclaw")).toBe(false);
+    // Jcode validates `params.mcpServers` as an array and then ignores it
+    // (session-scoped MCP is an upstream TODO); MCP lives in jcode's own
+    // config (~/.jcode/mcp.json), so a value saved here could not be honoured.
+    expect(providerSupportsMcpConfig("jcode")).toBe(false);
     expect(providerSupportsMcpConfig(undefined)).toBe(false);
     expect(providerSupportsMcpConfig(null)).toBe(false);
   });
